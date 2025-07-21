@@ -79,7 +79,7 @@ void load_device_id_from_nvs(void);
 #define FRAME_TAIL1        0x43
 
 // ---------------------- Device Identification ----------------------
-#define DEVICE_TYPE     "R60AFD1"
+#define DEVICE_TYPE     "R60AFD2"
 
 // ---------------------- Global Variables ----------------------
 
@@ -2232,6 +2232,15 @@ void load_device_id_from_nvs() {
     }
 }
 
+// ===== ฟังก์ชันนี้ต้องอยู่ตรงนี้ (นอก app_main) =====
+#define PRESENCE_INPUT_GPIO 1  // D1 (GPIO1)
+#define FALL_ALARM_GPIO     2  // D2 (GPIO2)
+
+void IRAM_ATTR fall_alarm_isr_handler(void* arg) {
+    printf("[FALL ALARM] ตรวจจับการล้ม! (GPIO%d)\n", FALL_ALARM_GPIO);
+    // ...
+}
+
 // Main entry point
 void app_main(void)
 {
@@ -2241,7 +2250,12 @@ void app_main(void)
     // Load device ID from NVS, or use default and save it
     load_device_id_from_nvs();
 
-    printf("DEVICE_ID=%s\n", g_device_id); // เพิ่มบรรทัดนี้
+    printf("========================================\n");
+    printf("  DEVICE_ID      : %s\n", g_device_id);
+    printf("  DEVICE_TYPE    : %s\n", DEVICE_TYPE);
+    printf("  FIRMWARE_VER   : %s\n", g_firmware_version[0] ? g_firmware_version : "N/A");
+    printf("  BUILD DATE     : %s %s\n", __DATE__, __TIME__);
+    printf("========================================\n");
 
     // Construct dynamic MQTT topics
     snprintf(mqtt_topic_settings_update, sizeof(mqtt_topic_settings_update), "%s/settings_update", g_device_id);
@@ -2298,6 +2312,46 @@ void app_main(void)
 
     // ใน app_main() ให้เพิ่มการสร้าง task นี้
     xTaskCreate(wifi_reset_button_task, "wifi_reset_button_task", 2048, NULL, 5, NULL);
+
+    // ====== เพิ่มโค้ดทดสอบ OTA แบบ hardcode URL ======
+    // ทดสอบ OTA ด้วย URL ตรงนี้ (สามารถ comment ออกได้หลังทดสอบ)
+    ota_update_start("https://dev-iot.datatamer.ai/api/firmwares/31/download");
+    // ====== จบส่วนเพิ่มโค้ดทดสอบ OTA ======
+
+    // กำหนดขา GPIO สำหรับ GP1 (Presence Input) และ GP2 (Fall Alarm)
+    #define PRESENCE_INPUT_GPIO 1  // D1 (GPIO1)
+    #define FALL_ALARM_GPIO     2  // D2 (GPIO2)
+
+    // ตั้งค่า GPIO สำหรับ GP1 (Presence Input)
+    gpio_config_t presence_io_conf = {
+        .pin_bit_mask = (1ULL << PRESENCE_INPUT_GPIO),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&presence_io_conf);
+
+    // ตั้งค่า GPIO สำหรับ GP2 (Fall Alarm) พร้อม interrupt
+    gpio_config_t fall_alarm_io_conf = {
+        .pin_bit_mask = (1ULL << FALL_ALARM_GPIO),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_POSEDGE, // Trigger ขอบขาขึ้น (เปลี่ยนได้ตามต้องการ)
+    };
+    gpio_config(&fall_alarm_io_conf);
+
+    // ติดตั้ง ISR service และเพิ่ม handler สำหรับ GP2
+    gpio_install_isr_service(0);
+    gpio_isr_handler_add(FALL_ALARM_GPIO, fall_alarm_isr_handler, NULL);
+
+    // ตัวอย่าง loop สำหรับอ่านค่า Presence Input (GP1)
+    while (1) {
+        int presence = gpio_get_level(PRESENCE_INPUT_GPIO);
+        printf("[PRESENCE] สถานะ Presence Input (GPIO%d): %d\n", PRESENCE_INPUT_GPIO, presence);
+        vTaskDelay(pdMS_TO_TICKS(1000)); // อ่านทุก 1 วินาที
+    }
 }
 
 // Add this function implementation with the other command functions
