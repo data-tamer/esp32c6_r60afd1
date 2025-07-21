@@ -39,6 +39,7 @@ void update_moving_distance(uint16_t new_distance);
 void update_stay_still_switch(bool enable);
 void update_stay_still_duration(uint32_t new_duration);
 void enable_human_presence_detection(bool enable);
+void update_height_proportion_switch(bool enable);
 void wifi_reset_button_task(void *arg);
 
 // Add these function prototypes after the other prototypes
@@ -145,6 +146,7 @@ volatile uint32_t g_height_accumulation_time = 0;  // Default value
 
 // Add this with the other global variables in the "Settings" section
 volatile bool g_fall_detection_switch = true;  // Default to enabled
+volatile bool g_height_proportion_switch = true;  // Default to enabled
 
 // Add this function prototype with the other prototypes at the top
 void update_fall_detection_switch(bool enable);
@@ -566,6 +568,7 @@ char* get_settings_json_payload_str(void)
     cJSON_AddNumberToObject(json, "stay_still_duration", g_stay_still_duration);
     cJSON_AddNumberToObject(json, "height_accumulation_time", g_height_accumulation_time);
     cJSON_AddBoolToObject(json, "fall_detection_switch", g_fall_detection_switch);
+    cJSON_AddBoolToObject(json, "height_proportion_switch", g_height_proportion_switch);
     cJSON_AddNumberToObject(json, "non_presence_time", g_non_presence_time);
     
     char *json_str = cJSON_Print(json);
@@ -1546,6 +1549,51 @@ void update_stay_still_duration(uint32_t new_duration) {
     }
 }
 
+// Function to update the height proportion switch setting on the radar device
+void update_height_proportion_switch(bool enable) {
+    // Frame structure (15 bytes total):
+    // Header (2) + Control (1) + Command (1) + Length (2) + Payload (6) + Check (1) + Tail (2)
+    uint8_t frame[15];
+    frame[0] = FRAME_HEADER0;   // 0x53
+    frame[1] = FRAME_HEADER1;   // 0x59
+    frame[2] = 0x83;            // Control for height proportion settings
+    frame[3] = 0x0E;            // Command for height proportion switch
+    frame[4] = 0x00;            // Length high byte
+    frame[5] = 0x06;            // Length low byte (6 bytes payload)
+    frame[6] = enable ? 0x01 : 0x00; // Payload byte 1: 0x01 to enable, 0x00 to disable
+    frame[7] = enable ? 0x01 : 0x00; // Payload byte 2: 0x01 to enable, 0x00 to disable
+    frame[8] = 0x00;            // Payload byte 3: padding/reserved
+    frame[9] = 0x00;            // Payload byte 4: padding/reserved
+    frame[10] = 0x00;           // Payload byte 5: padding/reserved
+    frame[11] = 0x00;           // Payload byte 6: padding/reserved
+
+    // Calculate checksum
+    uint32_t sum = 0;
+    for (int i = 0; i < 12; i++) {
+        sum += frame[i];
+    }
+    frame[12] = sum & 0xFF;
+
+    // Append tail
+    frame[13] = FRAME_TAIL0;    // 0x54
+    frame[14] = FRAME_TAIL1;    // 0x43
+
+    // Update global variable before sending UART command
+    g_height_proportion_switch = enable;
+
+    // Send frame via UART
+    uart_write_bytes(UART_PORT_NUM, (const char*)frame, sizeof(frame));
+    printf("Height Proportion Switch %s\n", enable ? "ENABLED" : "DISABLED");
+
+    // Add a small delay to ensure UART transmission is complete
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    // Check if MQTT client is initialized before publishing
+    if (mqtt_client != NULL) {
+        mqtt_publish_settings();
+    }
+}
+
 // This task periodically sends product information queries.
 void product_info_query_task(void *arg)
 {
@@ -1779,9 +1827,13 @@ void init_default_settings(void) {
     vTaskDelay(pdMS_TO_TICKS(200)); // Small delay between commands
     
     // Set default installation height (200 cm)
-    update_installation_height(200);
+    update_installation_height(220);
     vTaskDelay(pdMS_TO_TICKS(200));
     
+    // Set default enable fall detection 
+    update_fall_detection_switch(true);
+    vTaskDelay(pdMS_TO_TICKS(200));
+
     // Set default fall detection sensitivity (3)
     update_fall_detection_sensitivity(3);
     vTaskDelay(pdMS_TO_TICKS(200));
@@ -1790,8 +1842,8 @@ void init_default_settings(void) {
     update_fall_duration(5);
     vTaskDelay(pdMS_TO_TICKS(200));
     
-    // Set default fall breaking height (20 cm)
-    update_fall_breaking_height(20);
+    // Set default fall breaking height (150 cm)
+    update_fall_breaking_height(150);
     vTaskDelay(pdMS_TO_TICKS(200));
     
     // Set default sitting still distance (300 cm)
@@ -1807,6 +1859,10 @@ void init_default_settings(void) {
     
     // Enable fall detection by default
     update_fall_detection_switch(true);
+    vTaskDelay(pdMS_TO_TICKS(200));
+    
+    // Enable height proportion switch by default
+    update_height_proportion_switch(true);
     vTaskDelay(pdMS_TO_TICKS(200));
 
     // Set default non-presence time (300 seconds = 5 minutes)
@@ -1865,6 +1921,9 @@ void save_settings_to_nvs(void) {
     
     err = nvs_set_u8(nvs_handle, "fall_switch", g_fall_detection_switch ? 1 : 0);
     if (err != ESP_OK) printf("Error saving fall_switch: %s\n", esp_err_to_name(err));
+    
+    err = nvs_set_u8(nvs_handle, "height_prop_switch", g_height_proportion_switch ? 1 : 0);
+    if (err != ESP_OK) printf("Error saving height_prop_switch: %s\n", esp_err_to_name(err));
     
     err = nvs_set_u32(nvs_handle, "non_p_time", g_non_presence_time);
     if (err != ESP_OK) printf("Error saving non_presence_time: %s\n", esp_err_to_name(err));
@@ -1977,6 +2036,13 @@ void load_settings_from_nvs(void) {
         at_least_one_failed = true;
     }
     
+    uint8_t height_prop_switch = 1; // Default to enabled
+    err = nvs_get_u8(nvs_handle, "height_prop_switch", &height_prop_switch);
+    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
+        printf("Error reading height_prop_switch: %s\n", esp_err_to_name(err));
+        at_least_one_failed = true;
+    }
+    
     err = nvs_get_u32(nvs_handle, "non_p_time", &non_p_time);
     if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
         printf("Error reading non_p_time: %s\n", esp_err_to_name(err));
@@ -2037,6 +2103,9 @@ void load_settings_from_nvs(void) {
     vTaskDelay(pdMS_TO_TICKS(200));
     
     update_fall_detection_switch(fall_switch);
+    vTaskDelay(pdMS_TO_TICKS(200));
+    
+    update_height_proportion_switch(height_prop_switch);
     vTaskDelay(pdMS_TO_TICKS(200));
     
     update_height_accumulation_time(h_acc_t);
