@@ -70,7 +70,7 @@ void save_device_id_to_nvs(void);
 void load_device_id_from_nvs(void);
 
 // Add function prototype for fall alarm ISR handler
-void IRAM_ATTR fall_alarm_isr_handler(void* arg);
+void fall_alarm_isr_handler(void* arg);
 
 // Add function prototype for test function
 void test_fall_alarm_trigger(void);
@@ -683,6 +683,7 @@ void uart_read_task(void *arg)
 
     while(1) {
         int len = uart_read_bytes(UART_PORT_NUM, data, BUF_SIZE, pdMS_TO_TICKS(100));
+        printf("[UART] g_fall_alarm: %d\n", g_fall_alarm);
         if(len > 0) {
             int i = 0;
             while(i < len) {
