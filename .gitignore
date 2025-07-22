@@ -8,3 +8,4 @@ sdkconfig.old
 
 main/crt/*
 !main/crt/.gitkeep
+.vscode/

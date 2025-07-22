@@ -2233,12 +2233,13 @@ void load_device_id_from_nvs() {
 }
 
 // ===== ฟังก์ชันนี้ต้องอยู่ตรงนี้ (นอก app_main) =====
-#define PRESENCE_INPUT_GPIO 1  // D1 (GPIO1)
-#define FALL_ALARM_GPIO     2  // D2 (GPIO2)
+#define PRESENCE_INPUT_GPIO GPIO_NUM_1  // D1 (GPIO1)
+#define FALL_ALARM_GPIO     GPIO_NUM_18  // D2 (GPIO18)
 
 void IRAM_ATTR fall_alarm_isr_handler(void* arg) {
     printf("[FALL ALARM] ตรวจจับการล้ม! (GPIO%d)\n", FALL_ALARM_GPIO);
     // Check GPIO level and set fall alarm accordingly
+    
     int level = gpio_get_level(FALL_ALARM_GPIO);
     g_fall_alarm = (level == 1);
     printf("[FALL ALARM] GPIO level: %d, g_fall_alarm set to: %d\n", level, g_fall_alarm);
