@@ -69,6 +69,12 @@ void init_nvs(void);
 void save_device_id_to_nvs(void);
 void load_device_id_from_nvs(void);
 
+// Add function prototype for fall alarm ISR handler
+void IRAM_ATTR fall_alarm_isr_handler(void* arg);
+
+// Add function prototype for test function
+void test_fall_alarm_trigger(void);
+
 // ---------------------- UART and Frame Definitions ----------------------
 #define UART_PORT_NUM      UART_NUM_1
 #define BUF_SIZE           1024
@@ -2237,12 +2243,25 @@ void load_device_id_from_nvs() {
 #define FALL_ALARM_GPIO     GPIO_NUM_18  // D2 (GPIO18)
 
 void IRAM_ATTR fall_alarm_isr_handler(void* arg) {
+    // Note: printf() should not be used in ISR context, but for debugging we'll use it
+    // In production, you should use a different method to signal the main task
     printf("[FALL ALARM] ตรวจจับการล้ม! (GPIO%d)\n", FALL_ALARM_GPIO);
-    // Check GPIO level and set fall alarm accordingly
     
+    // Check GPIO level and set fall alarm accordingly
     int level = gpio_get_level(FALL_ALARM_GPIO);
     g_fall_alarm = (level == 1);
     printf("[FALL ALARM] GPIO level: %d, g_fall_alarm set to: %d\n", level, g_fall_alarm);
+    
+    // Clear the interrupt flag
+    gpio_intr_disable(FALL_ALARM_GPIO);
+    gpio_intr_enable(FALL_ALARM_GPIO);
+}
+
+// Test function to manually trigger fall alarm (for debugging)
+void test_fall_alarm_trigger(void) {
+    printf("[TEST] Manually triggering fall alarm...\n");
+    g_fall_alarm = true;
+    printf("[TEST] g_fall_alarm set to: %d\n", g_fall_alarm);
 }
 
 // Main entry point
@@ -2344,9 +2363,13 @@ void app_main(void)
     };
     gpio_config(&fall_alarm_io_conf);
 
-    // ติดตั้ง ISR service และเพิ่ม handler สำหรับ GP2
-    gpio_install_isr_service(0);
-    gpio_isr_handler_add(FALL_ALARM_GPIO, fall_alarm_isr_handler, NULL);
+    // เพิ่ม handler สำหรับ GP2 (ISR service ถูกติดตั้งแล้วโดย WiFi manager)
+    esp_err_t ret = gpio_isr_handler_add(FALL_ALARM_GPIO, fall_alarm_isr_handler, NULL);
+    if (ret != ESP_OK) {
+        printf("[ERROR] Failed to add fall alarm ISR handler: %s\n", esp_err_to_name(ret));
+    } else {
+        printf("[SUCCESS] Fall alarm ISR handler registered for GPIO%d\n", FALL_ALARM_GPIO);
+    }
 
     // Main loop - keep the system running
     // Note: GPIO polling has been removed to prevent interference with UART/ISR
@@ -2355,14 +2378,19 @@ void app_main(void)
         // Keep the main task alive - all actual work is done in separate tasks
         vTaskDelay(pdMS_TO_TICKS(10000)); // Check every 10 seconds
         
-        // Optional: Enable GPIO polling for debugging (uncomment if needed)
-        // #ifdef DEBUG_GPIO_POLLING
-        //     int presence = gpio_get_level(PRESENCE_INPUT_GPIO);
-        //     printf("[DEBUG] Presence Input (GPIO%d): %d\n", PRESENCE_INPUT_GPIO, presence);
-        //     
-        //     int fall_level = gpio_get_level(FALL_ALARM_GPIO);
-        //     printf("[DEBUG] Fall Alarm (GPIO%d): %d, g_fall_alarm: %d\n", FALL_ALARM_GPIO, fall_level, g_fall_alarm);
-        // #endif
+        // Debug: Print GPIO states periodically
+        int presence = gpio_get_level(PRESENCE_INPUT_GPIO);
+        int fall_level = gpio_get_level(FALL_ALARM_GPIO);
+        printf("[DEBUG] GPIO States - Presence (GPIO%d): %d, Fall Alarm (GPIO%d): %d, g_fall_alarm: %d\n", 
+               PRESENCE_INPUT_GPIO, presence, FALL_ALARM_GPIO, fall_level, g_fall_alarm);
+        
+        // Test fall alarm trigger every 30 seconds (for debugging - remove in production)
+        static int test_counter = 0;
+        test_counter++;
+        if (test_counter >= 3) { // Every 30 seconds (3 * 10 seconds)
+            test_fall_alarm_trigger();
+            test_counter = 0;
+        }
     }
 }
 
