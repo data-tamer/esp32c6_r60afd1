@@ -734,6 +734,7 @@ void uart_read_task(void *arg)
                     if(control == 0x80 && command == 0x01 && payload_len == 1) {
                         // Human presence report
                         g_presence = (data[i+6] == 0x01);
+                        g_fall_alarm = gpio_get_level(FALL_ALARM_GPIO);
                         printf("Parsed Presence: %d\n", g_presence);
                     }
                     else if(control == 0x05 && command == 0x01 && payload_len == 1) {
