@@ -762,6 +762,7 @@ void uart_read_task(void *arg)
                     else if(control == 0x83 && command == 0x01 && payload_len == 1) {
                         uint8_t fall_value = data[i + 6];
                         g_fall_alarm = (fall_value == 0x01);
+                        g_fall_alarm = gpio_get_level(FALL_ALARM_GPIO);
                         printf("Parsed Fall Alarm: %d\n", g_fall_alarm);
                     }
                     else if(control == 0x83 && command == 0x05 && payload_len == 1) {
