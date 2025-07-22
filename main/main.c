@@ -2238,7 +2238,10 @@ void load_device_id_from_nvs() {
 
 void IRAM_ATTR fall_alarm_isr_handler(void* arg) {
     printf("[FALL ALARM] ตรวจจับการล้ม! (GPIO%d)\n", FALL_ALARM_GPIO);
-    // ...
+    // Check GPIO level and set fall alarm accordingly
+    int level = gpio_get_level(FALL_ALARM_GPIO);
+    g_fall_alarm = (level == 1);
+    printf("[FALL ALARM] GPIO level: %d, g_fall_alarm set to: %d\n", level, g_fall_alarm);
 }
 
 // Main entry point
@@ -2346,10 +2349,16 @@ void app_main(void)
     gpio_install_isr_service(0);
     gpio_isr_handler_add(FALL_ALARM_GPIO, fall_alarm_isr_handler, NULL);
 
-    // ตัวอย่าง loop สำหรับอ่านค่า Presence Input (GP1)
+    // ตัวอย่าง loop สำหรับอ่านค่า Presence Input (GP1) และ Fall Alarm (GP2)
     while (1) {
         int presence = gpio_get_level(PRESENCE_INPUT_GPIO);
         printf("[PRESENCE] สถานะ Presence Input (GPIO%d): %d\n", PRESENCE_INPUT_GPIO, presence);
+        
+        // Check fall alarm GPIO level and update g_fall_alarm
+        int fall_level = gpio_get_level(FALL_ALARM_GPIO);
+        g_fall_alarm = (fall_level == 1);
+        printf("[FALL ALARM] สถานะ Fall Alarm (GPIO%d): %d, g_fall_alarm: %d\n", FALL_ALARM_GPIO, fall_level, g_fall_alarm);
+        
         vTaskDelay(pdMS_TO_TICKS(1000)); // อ่านทุก 1 วินาที
     }
 }
