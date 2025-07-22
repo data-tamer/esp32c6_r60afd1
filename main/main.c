@@ -2322,9 +2322,7 @@ void app_main(void)
     ota_update_start("https://dev-iot.datatamer.ai/api/firmwares/31/download");
     // ====== จบส่วนเพิ่มโค้ดทดสอบ OTA ======
 
-    // กำหนดขา GPIO สำหรับ GP1 (Presence Input) และ GP2 (Fall Alarm)
-    #define PRESENCE_INPUT_GPIO 1  // D1 (GPIO1)
-    #define FALL_ALARM_GPIO     2  // D2 (GPIO2)
+
 
     // ตั้งค่า GPIO สำหรับ GP1 (Presence Input)
     gpio_config_t presence_io_conf = {
