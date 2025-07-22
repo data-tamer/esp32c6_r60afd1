@@ -2349,17 +2349,21 @@ void app_main(void)
     gpio_install_isr_service(0);
     gpio_isr_handler_add(FALL_ALARM_GPIO, fall_alarm_isr_handler, NULL);
 
-    // ตัวอย่าง loop สำหรับอ่านค่า Presence Input (GP1) และ Fall Alarm (GP2)
+    // Main loop - keep the system running
+    // Note: GPIO polling has been removed to prevent interference with UART/ISR
+    // Fall detection is handled by ISR, presence detection by UART data
     while (1) {
-        int presence = gpio_get_level(PRESENCE_INPUT_GPIO);
-        printf("[PRESENCE] สถานะ Presence Input (GPIO%d): %d\n", PRESENCE_INPUT_GPIO, presence);
+        // Keep the main task alive - all actual work is done in separate tasks
+        vTaskDelay(pdMS_TO_TICKS(10000)); // Check every 10 seconds
         
-        // Check fall alarm GPIO level and update g_fall_alarm
-        int fall_level = gpio_get_level(FALL_ALARM_GPIO);
-        g_fall_alarm = (fall_level == 1);
-        printf("[FALL ALARM] สถานะ Fall Alarm (GPIO%d): %d, g_fall_alarm: %d\n", FALL_ALARM_GPIO, fall_level, g_fall_alarm);
-        
-        vTaskDelay(pdMS_TO_TICKS(1000)); // อ่านทุก 1 วินาที
+        // Optional: Enable GPIO polling for debugging (uncomment if needed)
+        // #ifdef DEBUG_GPIO_POLLING
+        //     int presence = gpio_get_level(PRESENCE_INPUT_GPIO);
+        //     printf("[DEBUG] Presence Input (GPIO%d): %d\n", PRESENCE_INPUT_GPIO, presence);
+        //     
+        //     int fall_level = gpio_get_level(FALL_ALARM_GPIO);
+        //     printf("[DEBUG] Fall Alarm (GPIO%d): %d, g_fall_alarm: %d\n", FALL_ALARM_GPIO, fall_level, g_fall_alarm);
+        // #endif
     }
 }
 
