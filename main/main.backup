@@ -39,7 +39,6 @@ void update_moving_distance(uint16_t new_distance);
 void update_stay_still_switch(bool enable);
 void update_stay_still_duration(uint32_t new_duration);
 void enable_human_presence_detection(bool enable);
-void update_height_proportion_switch(bool enable);
 void wifi_reset_button_task(void *arg);
 
 // Add these function prototypes after the other prototypes
@@ -69,15 +68,11 @@ void init_nvs(void);
 void save_device_id_to_nvs(void);
 void load_device_id_from_nvs(void);
 
-// Add function prototype for fall alarm ISR handler
-void IRAM_ATTR fall_alarm_isr_handler(void* arg);
-
-// Add function prototype for test function
-void test_fall_alarm_trigger(void);
-
 // ---------------------- UART and Frame Definitions ----------------------
 #define UART_PORT_NUM      UART_NUM_1
 #define BUF_SIZE           1024
+#define UART_TX_PIN        GPIO_NUM_7   // Connect to radar RX
+#define UART_RX_PIN        GPIO_NUM_6   // Connect to radar TX
 
 #define FRAME_HEADER0      0x53
 #define FRAME_HEADER1      0x59
@@ -85,7 +80,7 @@ void test_fall_alarm_trigger(void);
 #define FRAME_TAIL1        0x43
 
 // ---------------------- Device Identification ----------------------
-#define DEVICE_TYPE     "R60AFD2"
+#define DEVICE_TYPE     "R60AFD1"
 
 // ---------------------- Global Variables ----------------------
 
@@ -152,7 +147,6 @@ volatile uint32_t g_height_accumulation_time = 0;  // Default value
 
 // Add this with the other global variables in the "Settings" section
 volatile bool g_fall_detection_switch = true;  // Default to enabled
-volatile bool g_height_proportion_switch = true;  // Default to enabled
 
 // Add this function prototype with the other prototypes at the top
 void update_fall_detection_switch(bool enable);
@@ -574,7 +568,6 @@ char* get_settings_json_payload_str(void)
     cJSON_AddNumberToObject(json, "stay_still_duration", g_stay_still_duration);
     cJSON_AddNumberToObject(json, "height_accumulation_time", g_height_accumulation_time);
     cJSON_AddBoolToObject(json, "fall_detection_switch", g_fall_detection_switch);
-    cJSON_AddBoolToObject(json, "height_proportion_switch", g_height_proportion_switch);
     cJSON_AddNumberToObject(json, "non_presence_time", g_non_presence_time);
     
     char *json_str = cJSON_Print(json);
@@ -1555,51 +1548,6 @@ void update_stay_still_duration(uint32_t new_duration) {
     }
 }
 
-// Function to update the height proportion switch setting on the radar device
-void update_height_proportion_switch(bool enable) {
-    // Frame structure (15 bytes total):
-    // Header (2) + Control (1) + Command (1) + Length (2) + Payload (6) + Check (1) + Tail (2)
-    uint8_t frame[15];
-    frame[0] = FRAME_HEADER0;   // 0x53
-    frame[1] = FRAME_HEADER1;   // 0x59
-    frame[2] = 0x83;            // Control for height proportion settings
-    frame[3] = 0x0E;            // Command for height proportion switch
-    frame[4] = 0x00;            // Length high byte
-    frame[5] = 0x06;            // Length low byte (6 bytes payload)
-    frame[6] = enable ? 0x01 : 0x00; // Payload byte 1: 0x01 to enable, 0x00 to disable
-    frame[7] = enable ? 0x01 : 0x00; // Payload byte 2: 0x01 to enable, 0x00 to disable
-    frame[8] = 0x00;            // Payload byte 3: padding/reserved
-    frame[9] = 0x00;            // Payload byte 4: padding/reserved
-    frame[10] = 0x00;           // Payload byte 5: padding/reserved
-    frame[11] = 0x00;           // Payload byte 6: padding/reserved
-
-    // Calculate checksum
-    uint32_t sum = 0;
-    for (int i = 0; i < 12; i++) {
-        sum += frame[i];
-    }
-    frame[12] = sum & 0xFF;
-
-    // Append tail
-    frame[13] = FRAME_TAIL0;    // 0x54
-    frame[14] = FRAME_TAIL1;    // 0x43
-
-    // Update global variable before sending UART command
-    g_height_proportion_switch = enable;
-
-    // Send frame via UART
-    uart_write_bytes(UART_PORT_NUM, (const char*)frame, sizeof(frame));
-    printf("Height Proportion Switch %s\n", enable ? "ENABLED" : "DISABLED");
-
-    // Add a small delay to ensure UART transmission is complete
-    vTaskDelay(pdMS_TO_TICKS(100));
-
-    // Check if MQTT client is initialized before publishing
-    if (mqtt_client != NULL) {
-        mqtt_publish_settings();
-    }
-}
-
 // This task periodically sends product information queries.
 void product_info_query_task(void *arg)
 {
@@ -1833,13 +1781,9 @@ void init_default_settings(void) {
     vTaskDelay(pdMS_TO_TICKS(200)); // Small delay between commands
     
     // Set default installation height (200 cm)
-    update_installation_height(220);
+    update_installation_height(200);
     vTaskDelay(pdMS_TO_TICKS(200));
     
-    // Set default enable fall detection 
-    update_fall_detection_switch(true);
-    vTaskDelay(pdMS_TO_TICKS(200));
-
     // Set default fall detection sensitivity (3)
     update_fall_detection_sensitivity(3);
     vTaskDelay(pdMS_TO_TICKS(200));
@@ -1848,8 +1792,8 @@ void init_default_settings(void) {
     update_fall_duration(5);
     vTaskDelay(pdMS_TO_TICKS(200));
     
-    // Set default fall breaking height (150 cm)
-    update_fall_breaking_height(150);
+    // Set default fall breaking height (20 cm)
+    update_fall_breaking_height(20);
     vTaskDelay(pdMS_TO_TICKS(200));
     
     // Set default sitting still distance (300 cm)
@@ -1865,10 +1809,6 @@ void init_default_settings(void) {
     
     // Enable fall detection by default
     update_fall_detection_switch(true);
-    vTaskDelay(pdMS_TO_TICKS(200));
-    
-    // Enable height proportion switch by default
-    update_height_proportion_switch(true);
     vTaskDelay(pdMS_TO_TICKS(200));
 
     // Set default non-presence time (300 seconds = 5 minutes)
@@ -1927,9 +1867,6 @@ void save_settings_to_nvs(void) {
     
     err = nvs_set_u8(nvs_handle, "fall_switch", g_fall_detection_switch ? 1 : 0);
     if (err != ESP_OK) printf("Error saving fall_switch: %s\n", esp_err_to_name(err));
-    
-    err = nvs_set_u8(nvs_handle, "height_prop_switch", g_height_proportion_switch ? 1 : 0);
-    if (err != ESP_OK) printf("Error saving height_prop_switch: %s\n", esp_err_to_name(err));
     
     err = nvs_set_u32(nvs_handle, "non_p_time", g_non_presence_time);
     if (err != ESP_OK) printf("Error saving non_presence_time: %s\n", esp_err_to_name(err));
@@ -2042,13 +1979,6 @@ void load_settings_from_nvs(void) {
         at_least_one_failed = true;
     }
     
-    uint8_t height_prop_switch = 1; // Default to enabled
-    err = nvs_get_u8(nvs_handle, "height_prop_switch", &height_prop_switch);
-    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
-        printf("Error reading height_prop_switch: %s\n", esp_err_to_name(err));
-        at_least_one_failed = true;
-    }
-    
     err = nvs_get_u32(nvs_handle, "non_p_time", &non_p_time);
     if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
         printf("Error reading non_p_time: %s\n", esp_err_to_name(err));
@@ -2109,9 +2039,6 @@ void load_settings_from_nvs(void) {
     vTaskDelay(pdMS_TO_TICKS(200));
     
     update_fall_detection_switch(fall_switch);
-    vTaskDelay(pdMS_TO_TICKS(200));
-    
-    update_height_proportion_switch(height_prop_switch);
     vTaskDelay(pdMS_TO_TICKS(200));
     
     update_height_accumulation_time(h_acc_t);
@@ -2238,32 +2165,6 @@ void load_device_id_from_nvs() {
     }
 }
 
-// ===== ฟังก์ชันนี้ต้องอยู่ตรงนี้ (นอก app_main) =====
-#define PRESENCE_INPUT_GPIO GPIO_NUM_1  // D1 (GPIO1)
-#define FALL_ALARM_GPIO     GPIO_NUM_18  // D2 (GPIO18)
-
-void IRAM_ATTR fall_alarm_isr_handler(void* arg) {
-    // Note: printf() should not be used in ISR context, but for debugging we'll use it
-    // In production, you should use a different method to signal the main task
-    printf("[FALL ALARM] ตรวจจับการล้ม! (GPIO%d)\n", FALL_ALARM_GPIO);
-    
-    // Check GPIO level and set fall alarm accordingly
-    int level = gpio_get_level(FALL_ALARM_GPIO);
-    g_fall_alarm = (level == 1);
-    printf("[FALL ALARM] GPIO level: %d, g_fall_alarm set to: %d\n", level, g_fall_alarm);
-    
-    // Clear the interrupt flag
-    gpio_intr_disable(FALL_ALARM_GPIO);
-    gpio_intr_enable(FALL_ALARM_GPIO);
-}
-
-// Test function to manually trigger fall alarm (for debugging)
-void test_fall_alarm_trigger(void) {
-    printf("[TEST] Manually triggering fall alarm...\n");
-    g_fall_alarm = true;
-    printf("[TEST] g_fall_alarm set to: %d\n", g_fall_alarm);
-}
-
 // Main entry point
 void app_main(void)
 {
@@ -2273,12 +2174,7 @@ void app_main(void)
     // Load device ID from NVS, or use default and save it
     load_device_id_from_nvs();
 
-    printf("========================================\n");
-    printf("  DEVICE_ID      : %s\n", g_device_id);
-    printf("  DEVICE_TYPE    : %s\n", DEVICE_TYPE);
-    printf("  FIRMWARE_VER   : %s\n", g_firmware_version[0] ? g_firmware_version : "N/A");
-    printf("  BUILD DATE     : %s %s\n", __DATE__, __TIME__);
-    printf("========================================\n");
+    printf("DEVICE_ID=%s\n", g_device_id); // เพิ่มบรรทัดนี้
 
     // Construct dynamic MQTT topics
     snprintf(mqtt_topic_settings_update, sizeof(mqtt_topic_settings_update), "%s/settings_update", g_device_id);
@@ -2335,58 +2231,6 @@ void app_main(void)
 
     // ใน app_main() ให้เพิ่มการสร้าง task นี้
     xTaskCreate(wifi_reset_button_task, "wifi_reset_button_task", 2048, NULL, 5, NULL);
-
-    // ====== เพิ่มโค้ดทดสอบ OTA แบบ hardcode URL ======
-    // ทดสอบ OTA ด้วย URL ตรงนี้ (สามารถ comment ออกได้หลังทดสอบ)
-    ota_update_start("https://dev-iot.datatamer.ai/api/firmwares/31/download");
-    // ====== จบส่วนเพิ่มโค้ดทดสอบ OTA ======
-
-
-
-    // ตั้งค่า GPIO สำหรับ GP1 (Presence Input)
-    gpio_config_t presence_io_conf = {
-        .pin_bit_mask = (1ULL << PRESENCE_INPUT_GPIO),
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    gpio_config(&presence_io_conf);
-
-    // ตั้งค่า GPIO สำหรับ GP2 (Fall Alarm) พร้อม interrupt
-    gpio_config_t fall_alarm_io_conf = {
-        .pin_bit_mask = (1ULL << FALL_ALARM_GPIO),
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_POSEDGE, // Trigger ขอบขาขึ้น (เปลี่ยนได้ตามต้องการ)
-    };
-    gpio_config(&fall_alarm_io_conf);
-
-    // เพิ่ม handler สำหรับ GP2 (ISR service ถูกติดตั้งแล้วโดย WiFi manager)
-    esp_err_t ret = gpio_isr_handler_add(FALL_ALARM_GPIO, fall_alarm_isr_handler, NULL);
-    if (ret != ESP_OK) {
-        printf("[ERROR] Failed to add fall alarm ISR handler: %s\n", esp_err_to_name(ret));
-    } else {
-        printf("[SUCCESS] Fall alarm ISR handler registered for GPIO%d\n", FALL_ALARM_GPIO);
-    }
-
-    // Main loop - keep the system running
-    // Note: GPIO polling has been removed to prevent interference with UART/ISR
-    // Fall detection is handled by ISR, presence detection by UART data
-    while (1) {
-        // Keep the main task alive - all actual work is done in separate tasks
-        vTaskDelay(pdMS_TO_TICKS(10000)); // Check every 10 seconds
-        
-        // Debug: Print GPIO states periodically
-        int presence = gpio_get_level(PRESENCE_INPUT_GPIO);
-        int fall_level = gpio_get_level(FALL_ALARM_GPIO);
-        printf("[DEBUG] GPIO States - Presence (GPIO%d): %d, Fall Alarm (GPIO%d): %d, g_fall_alarm: %d\n", 
-               PRESENCE_INPUT_GPIO, presence, FALL_ALARM_GPIO, fall_level, g_fall_alarm);
-        
-      
-      
-    }
 }
 
 // Add this function implementation with the other command functions
