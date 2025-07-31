@@ -2357,14 +2357,14 @@ void app_main(void)
     gpio_config(&presence_io_conf);
 
     // ตั้งค่า GPIO สำหรับ GP2 (Fall Alarm) พร้อม interrupt
-    gpio_config_t fall_alarm_io_conf = {
-        .pin_bit_mask = (1ULL << FALL_ALARM_GPIO),
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_POSEDGE, // Trigger ขอบขาขึ้น (เปลี่ยนได้ตามต้องการ)
-    };
-    gpio_config(&fall_alarm_io_conf);
+    // gpio_config_t fall_alarm_io_conf = {
+    //     .pin_bit_mask = (1ULL << FALL_ALARM_GPIO),
+    //     .mode = GPIO_MODE_INPUT,
+    //     .pull_up_en = GPIO_PULLUP_ENABLE,
+    //     .pull_down_en = GPIO_PULLDOWN_DISABLE,
+    //     .intr_type = GPIO_INTR_POSEDGE, // Trigger ขอบขาขึ้น (เปลี่ยนได้ตามต้องการ)
+    // };
+    // gpio_config(&fall_alarm_io_conf);
 
     // เพิ่ม handler สำหรับ GP2 (ISR service ถูกติดตั้งแล้วโดย WiFi manager)
     esp_err_t ret = gpio_isr_handler_add(FALL_ALARM_GPIO, fall_alarm_isr_handler, NULL);
