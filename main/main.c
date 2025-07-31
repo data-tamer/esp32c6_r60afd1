@@ -77,6 +77,10 @@ void test_fall_alarm_trigger(void);
 
 // Add function prototype for fall alarm GPIO helper
 void update_fall_alarm_from_gpio(void);
+void debug_gpio_configuration(void);
+
+// Add this function prototype with the other prototypes at the top of the file
+static void gpio18_input_debug_task(void *arg);
 
 // ---------------------- UART and Frame Definitions ----------------------
 #define UART_PORT_NUM      UART_NUM_1
@@ -156,6 +160,9 @@ volatile uint32_t g_height_accumulation_time = 0;  // Default value
 // Add this with the other global variables in the "Settings" section
 volatile bool g_fall_detection_switch = true;  // Default to enabled
 volatile bool g_height_proportion_switch = true;  // Default to enabled
+
+// Add this with the other global variables for testing
+volatile bool g_test_fall_alarm_triggered = false;  // Flag to trigger test function
 
 // Add this function prototype with the other prototypes at the top
 void update_fall_detection_switch(bool enable);
@@ -764,16 +771,12 @@ void uart_read_task(void *arg)
                         printf("Parsed Body Movement Param: %d\n", g_body_movement_param);
                     }
                     else if(control == 0x83 && command == 0x01 && payload_len == 1) {
-                        // Fall Alarm report จาก UART
-                        uint8_t fall_value = data[i + 6];
-                        // if (fall_value == 0x01) {
-                        //     g_fall_alarm = 1; // ล้ม
-                        // } else {
-                        //     g_fall_alarm = 0; // ไม่มีการล้ม
-                        // }
-                        // อัปเดต g_fall_alarm ตามสถานะของ GPIO แทนข้อมูลจาก UART
-                        update_fall_alarm_from_gpio();
-                        printf("Parsed Fall Alarm from GPIO: %d (UART value was: %d)\n", g_fall_alarm, fall_value);
+                        // uint8_t fall_value = data[i + 6];
+                        // g_fall_alarm = (fall_value == 0x01);
+
+                        // g_fall_alarm = gpio_get_level(GPIO_NUM_18);
+
+                        printf("Parsed Fall Alarm: %d\n", g_fall_alarm);
                     }
                     else if(control == 0x83 && command == 0x05 && payload_len == 1) {
                         uint8_t still_value = data[i + 6];
@@ -2254,17 +2257,20 @@ void load_device_id_from_nvs() {
 #define PRESENCE_INPUT_GPIO GPIO_NUM_1  // D1 (GPIO1)
 #define FALL_ALARM_GPIO     GPIO_NUM_18  // D2 (GPIO18)
 
+// Global flag to indicate ISR was triggered (safe for ISR context)
+// Using volatile bool instead of printf() in ISR to prevent deadlocks
+volatile bool g_fall_alarm_isr_triggered = false;
+
+// Note: g_test_fall_alarm_triggered is already declared at line 164
+
 void IRAM_ATTR fall_alarm_isr_handler(void* arg) {
-    // Note: printf() should not be used in ISR context, but for debugging we'll use it
-    // In production, you should use a different method to signal the main task
-    printf("[FALL ALARM] ตรวจจับการล้ม! (GPIO%d)\n", FALL_ALARM_GPIO);
+    // Set flag to indicate ISR was triggered (safe operation)
+    g_fall_alarm_isr_triggered = true;
     
-    // Check GPIO level and set fall alarm accordingly
-    int level = gpio_get_level(FALL_ALARM_GPIO);
-    g_fall_alarm = (level == 1); // อัปเดตตามสถานะของ GPIO ที่แท้จริง
-    printf("[FALL ALARM] GPIO level: %d, g_fall_alarm set to: %d\n", level, g_fall_alarm);
+    // Note: We'll read the GPIO level in the main loop instead of here
+    // to avoid potential issues with gpio_get_level() in ISR context
     
-    // Clear the interrupt flag
+    // Clear the interrupt flag by toggling the interrupt
     gpio_intr_disable(FALL_ALARM_GPIO);
     gpio_intr_enable(FALL_ALARM_GPIO);
 }
@@ -2272,10 +2278,117 @@ void IRAM_ATTR fall_alarm_isr_handler(void* arg) {
 // Test function to manually trigger fall alarm (for debugging)
 void test_fall_alarm_trigger(void) {
     printf("[TEST] Manually triggering fall alarm...\n");
-    // อัปเดต g_fall_alarm ตามสถานะของ GPIO แทนที่จะตั้งค่าเป็น true อย่างเดียว
+    
+    // Clear the ISR flag first
+    g_fall_alarm_isr_triggered = false;
+    
+    // Test 1: Check current GPIO state
+    int initial_level = gpio_get_level(FALL_ALARM_GPIO);
+    printf("[TEST] Initial GPIO%d level: %d\n", FALL_ALARM_GPIO, initial_level);
+    
+    // Test 1.5: Verify ISR handler is registered
+    printf("[TEST] Verifying ISR handler registration...\n");
+    printf("[TEST] ISR flag before test: %s\n", g_fall_alarm_isr_triggered ? "true" : "false");
+    
+    // Test 2: Simulate external HIGH signal by temporarily enabling pull-up
+    printf("[TEST] Simulating external HIGH signal...\n");
+    
+    // Temporarily configure GPIO18 with pull-up to simulate HIGH signal
+    gpio_config_t test_io_conf = {
+        .pin_bit_mask = (1ULL << FALL_ALARM_GPIO),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,  // Enable pull-up to simulate HIGH
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_ANYEDGE
+    };
+    
+    // Configure with pull-up (this should trigger ISR due to level change)
+    esp_err_t config_ret = gpio_config(&test_io_conf);
+    if (config_ret != ESP_OK) {
+        printf("[TEST] ERROR: Failed to configure GPIO with pull-up: %s\n", esp_err_to_name(config_ret));
+    } else {
+        printf("[TEST] GPIO configured with pull-up successfully\n");
+    }
+    
+    // Check the level after configuration
+    int level_after_pullup = gpio_get_level(FALL_ALARM_GPIO);
+    printf("[TEST] GPIO level after pull-up configuration: %d\n", level_after_pullup);
+    
+    // Wait for ISR to trigger
+    vTaskDelay(pdMS_TO_TICKS(200));
+    
+    // Check if ISR was triggered
+    if (g_fall_alarm_isr_triggered) {
+        printf("[TEST] ✓ ISR triggered successfully on HIGH signal!\n");
+        // Update g_fall_alarm state
+        g_fall_alarm = (gpio_get_level(FALL_ALARM_GPIO) == 1);
+        printf("[TEST] Updated g_fall_alarm to: %d\n", g_fall_alarm);
+        g_fall_alarm_isr_triggered = false;  // Clear the flag
+    } else {
+        printf("[TEST] ⚠ ISR was NOT triggered on HIGH signal\n");
+    }
+    
+    // Test 3: Simulate external LOW signal by restoring pull-down
+    printf("[TEST] Simulating external LOW signal...\n");
+    
+    // Restore original GPIO configuration (input with pull-down)
+    gpio_config_t fall_alarm_io_conf = {
+        .pin_bit_mask = (1ULL << FALL_ALARM_GPIO),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_ENABLE,
+        .intr_type = GPIO_INTR_ANYEDGE
+    };
+    gpio_config(&fall_alarm_io_conf);
+    
+    // Wait for ISR to trigger on falling edge
+    vTaskDelay(pdMS_TO_TICKS(200));
+    
+    // Check if ISR was triggered again
+    if (g_fall_alarm_isr_triggered) {
+        printf("[TEST] ✓ ISR triggered successfully on LOW signal!\n");
+        // Update g_fall_alarm state
+        g_fall_alarm = (gpio_get_level(FALL_ALARM_GPIO) == 1);
+        printf("[TEST] Updated g_fall_alarm to: %d\n", g_fall_alarm);
+        g_fall_alarm_isr_triggered = false;  // Clear the flag
+    } else {
+        printf("[TEST] ⚠ ISR was NOT triggered on LOW signal\n");
+    }
+    
+    // Update internal state
     update_fall_alarm_from_gpio();
-    int fall_level = gpio_get_level(FALL_ALARM_GPIO);
-    printf("[TEST] g_fall_alarm set to: %d (GPIO level: %d)\n", g_fall_alarm, fall_level);
+    
+    printf("[TEST] Final GPIO%d level: %d\n", FALL_ALARM_GPIO, gpio_get_level(FALL_ALARM_GPIO));
+    printf("[TEST] Current g_fall_alarm state: %d\n", g_fall_alarm);
+    
+    // Test 4: Verify ISR handler can be re-registered
+    printf("[TEST] Testing ISR handler re-registration...\n");
+    esp_err_t remove_ret = gpio_isr_handler_remove(FALL_ALARM_GPIO);
+    if (remove_ret != ESP_OK) {
+        printf("[TEST] WARNING: Failed to remove ISR handler: %s\n", esp_err_to_name(remove_ret));
+    } else {
+        printf("[TEST] ISR handler removed successfully\n");
+    }
+    
+    esp_err_t add_ret = gpio_isr_handler_add(FALL_ALARM_GPIO, fall_alarm_isr_handler, NULL);
+    if (add_ret != ESP_OK) {
+        printf("[TEST] ERROR: Failed to re-add ISR handler: %s\n", esp_err_to_name(add_ret));
+    } else {
+        printf("[TEST] ISR handler re-added successfully\n");
+    }
+}
+
+// Add this task implementation before app_main()
+static void gpio18_input_debug_task(void *arg)
+{
+    // Simple GPIO configuration like the working code
+    gpio_set_direction(GPIO_NUM_18, GPIO_MODE_INPUT);
+    
+    while (1) {
+        int level = gpio_get_level(GPIO_NUM_18);
+        ESP_LOGI("GPIO18_DEBUG", "GPIO18 level: %d", level);
+        vTaskDelay(pdMS_TO_TICKS(200));  // Read every 200ms
+    }
 }
 
 // Main entry point
@@ -2353,6 +2466,9 @@ void app_main(void)
 
     // ใน app_main() ให้เพิ่มการสร้าง task นี้
     xTaskCreate(wifi_reset_button_task, "wifi_reset_button_task", 2048, NULL, 5, NULL);
+    
+    // Add the GPIO debug task like in the working radar_uart.c code
+    xTaskCreate(gpio18_input_debug_task, "gpio18_input_debug_task", 3072, NULL, 5, NULL);
 
     // ====== เพิ่มโค้ดทดสอบ OTA แบบ hardcode URL ======
     // ทดสอบ OTA ด้วย URL ตรงนี้ (สามารถ comment ออกได้หลังทดสอบ)
@@ -2371,40 +2487,23 @@ void app_main(void)
     };
     gpio_config(&presence_io_conf);
 
-    // ตั้งค่า GPIO สำหรับ GP2 (Fall Alarm) พร้อม interrupt
-    // gpio_config_t fall_alarm_io_conf = {
-    //     .pin_bit_mask = (1ULL << FALL_ALARM_GPIO),
-    //     .mode = GPIO_MODE_INPUT,
-    //     .pull_up_en = GPIO_PULLUP_ENABLE,
-    //     .pull_down_en = GPIO_PULLDOWN_DISABLE,
-    //     .intr_type = GPIO_INTR_POSEDGE, // Trigger ขอบขาขึ้น (เปลี่ยนได้ตามต้องการ)
-    // };
-    // gpio_config(&fall_alarm_io_conf);
-
-    // เพิ่ม handler สำหรับ GP2 (ISR service ถูกติดตั้งแล้วโดย WiFi manager)
-    ret = gpio_isr_handler_add(FALL_ALARM_GPIO, fall_alarm_isr_handler, NULL);
-    if (ret != ESP_OK) {
-        printf("[ERROR] Failed to add fall alarm ISR handler: %s\n", esp_err_to_name(ret));
-    } else {
-        printf("[SUCCESS] Fall alarm ISR handler registered for GPIO%d\n", FALL_ALARM_GPIO);
-    }
+    // Simple GPIO configuration like the working radar_uart.c code
+    gpio_set_direction(FALL_ALARM_GPIO, GPIO_MODE_INPUT);
+    printf("[SUCCESS] GPIO%d configured as simple input (no pull-up/pull-down)\n", FALL_ALARM_GPIO);
+    
+    // Note: Removed complex ISR setup that might interfere with reading
+    
+    // GPIO configuration is now handled by dedicated task
+    printf("[MAIN] GPIO18 debug task started - check logs for GPIO readings\n");
 
     // Main loop - keep the system running
-    // Note: GPIO polling has been removed to prevent interference with UART/ISR
-    // Fall detection is handled by ISR, presence detection by UART data
+    // GPIO reading is now handled by dedicated task (gpio18_input_debug_task)
     while (1) {
         // Keep the main task alive - all actual work is done in separate tasks
         vTaskDelay(pdMS_TO_TICKS(10000)); // Check every 10 seconds
         
-        // Debug: Print GPIO states periodically
-        int presence = gpio_get_level(PRESENCE_INPUT_GPIO);
-        int fall_level = gpio_get_level(FALL_ALARM_GPIO);
-        
-        // อัปเดต g_fall_alarm ให้ตรงกับสถานะของ fall_level
-        update_fall_alarm_from_gpio();
-        
-        printf("[DEBUG] GPIO States - Presence (GPIO%d): %d, Fall Alarm (GPIO%d): %d, g_fall_alarm: %d\n", 
-               PRESENCE_INPUT_GPIO, presence, FALL_ALARM_GPIO, fall_level, g_fall_alarm);
+        // Simple status message
+        printf("[MAIN] System running - GPIO18 reading handled by dedicated task\n");
     }
 }
 // Add this function implementation with the other command functions
@@ -2470,5 +2569,26 @@ void wifi_reset_button_task(void *arg) {
 void update_fall_alarm_from_gpio(void) {
     int fall_level = gpio_get_level(FALL_ALARM_GPIO);
     g_fall_alarm = (fall_level == 1);
+}
+
+// Function to test and debug GPIO configuration
+void debug_gpio_configuration(void) {
+    printf("[GPIO DEBUG] Testing GPIO configuration...\n");
+    
+    // Test fall alarm GPIO
+    int fall_level = gpio_get_level(FALL_ALARM_GPIO);
+    printf("[GPIO DEBUG] Fall Alarm GPIO%d level: %d (should be 0 with pull-down enabled)\n", FALL_ALARM_GPIO, fall_level);
+    
+    // Test presence GPIO
+    int presence_level = gpio_get_level(PRESENCE_INPUT_GPIO);
+    printf("[GPIO DEBUG] Presence GPIO%d level: %d\n", PRESENCE_INPUT_GPIO, presence_level);
+    
+    // Verify pull-down is working
+    if (fall_level == 0) {
+        printf("[GPIO DEBUG] ✓ Fall alarm GPIO pull-down working correctly\n");
+    } else {
+        printf("[GPIO DEBUG] ⚠ Fall alarm GPIO should be LOW (0) with pull-down enabled\n");
+        printf("[GPIO DEBUG] Check if sensor is driving the pin HIGH or if there's a wiring issue\n");
+    }
 }
 
