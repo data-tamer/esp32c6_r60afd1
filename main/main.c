@@ -75,6 +75,9 @@ void fall_alarm_isr_handler(void* arg);
 // Add function prototype for test function
 void test_fall_alarm_trigger(void);
 
+// Add function prototype for fall alarm GPIO helper
+void update_fall_alarm_from_gpio(void);
+
 // ---------------------- UART and Frame Definitions ----------------------
 #define UART_PORT_NUM      UART_NUM_1
 #define BUF_SIZE           1024
@@ -85,7 +88,7 @@ void test_fall_alarm_trigger(void);
 #define FRAME_TAIL1        0x43
 
 // ---------------------- Device Identification ----------------------
-#define DEVICE_TYPE     "R60AFD2"
+#define DEVICE_TYPE     "R60AFD1"
 
 // ---------------------- Global Variables ----------------------
 
@@ -735,7 +738,6 @@ void uart_read_task(void *arg)
                     if(control == 0x80 && command == 0x01 && payload_len == 1) {
                         // Human presence report
                         g_presence = (data[i+6] == 0x01);
-                        g_fall_alarm = gpio_get_level(GPIO_NUM_18);
                         printf("Parsed Presence: %d\n", g_presence);
                     }
                     else if(control == 0x05 && command == 0x01 && payload_len == 1) {
@@ -762,10 +764,16 @@ void uart_read_task(void *arg)
                         printf("Parsed Body Movement Param: %d\n", g_body_movement_param);
                     }
                     else if(control == 0x83 && command == 0x01 && payload_len == 1) {
+                        // Fall Alarm report จาก UART
                         uint8_t fall_value = data[i + 6];
-                        g_fall_alarm = (fall_value == 0x01);
-                        g_fall_alarm = gpio_get_level(GPIO_NUM_18);
-                        printf("Parsed Fall Alarm: %d\n", g_fall_alarm);
+                        // if (fall_value == 0x01) {
+                        //     g_fall_alarm = 1; // ล้ม
+                        // } else {
+                        //     g_fall_alarm = 0; // ไม่มีการล้ม
+                        // }
+                        // อัปเดต g_fall_alarm ตามสถานะของ GPIO แทนข้อมูลจาก UART
+                        update_fall_alarm_from_gpio();
+                        printf("Parsed Fall Alarm from GPIO: %d (UART value was: %d)\n", g_fall_alarm, fall_value);
                     }
                     else if(control == 0x83 && command == 0x05 && payload_len == 1) {
                         uint8_t still_value = data[i + 6];
@@ -876,6 +884,7 @@ void uart_read_task(void *arg)
                         // Fall Detection Parameters
                         g_fall_detection_sensitivity = data[i + 6];
                         g_fall_duration = ((uint32_t)data[i+10] << 24) | 
+                        
                                          ((uint32_t)data[i+9] << 16) | 
                                          ((uint32_t)data[i+8] << 8) | 
                                           data[i+7];
@@ -2252,7 +2261,7 @@ void IRAM_ATTR fall_alarm_isr_handler(void* arg) {
     
     // Check GPIO level and set fall alarm accordingly
     int level = gpio_get_level(FALL_ALARM_GPIO);
-    g_fall_alarm = (level == 1);
+    g_fall_alarm = (level == 1); // อัปเดตตามสถานะของ GPIO ที่แท้จริง
     printf("[FALL ALARM] GPIO level: %d, g_fall_alarm set to: %d\n", level, g_fall_alarm);
     
     // Clear the interrupt flag
@@ -2263,15 +2272,21 @@ void IRAM_ATTR fall_alarm_isr_handler(void* arg) {
 // Test function to manually trigger fall alarm (for debugging)
 void test_fall_alarm_trigger(void) {
     printf("[TEST] Manually triggering fall alarm...\n");
-    g_fall_alarm = true;
-    printf("[TEST] g_fall_alarm set to: %d\n", g_fall_alarm);
+    // อัปเดต g_fall_alarm ตามสถานะของ GPIO แทนที่จะตั้งค่าเป็น true อย่างเดียว
+    update_fall_alarm_from_gpio();
+    int fall_level = gpio_get_level(FALL_ALARM_GPIO);
+    printf("[TEST] g_fall_alarm set to: %d (GPIO level: %d)\n", g_fall_alarm, fall_level);
 }
 
 // Main entry point
 void app_main(void)
 {
-    // Initialize NVS first
-    init_nvs();
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        nvs_flash_erase();
+        nvs_flash_init();
+    }
+
     printf("Release 1.0.3\n");
     // Load device ID from NVS, or use default and save it
     load_device_id_from_nvs();
@@ -2341,7 +2356,7 @@ void app_main(void)
 
     // ====== เพิ่มโค้ดทดสอบ OTA แบบ hardcode URL ======
     // ทดสอบ OTA ด้วย URL ตรงนี้ (สามารถ comment ออกได้หลังทดสอบ)
-    ota_update_start("https://dev-iot.datatamer.ai/api/firmwares/31/download");
+    // ota_update_start("https://dev-iot.datatamer.ai/api/firmwares/31/download");
     // ====== จบส่วนเพิ่มโค้ดทดสอบ OTA ======
 
 
@@ -2367,7 +2382,7 @@ void app_main(void)
     // gpio_config(&fall_alarm_io_conf);
 
     // เพิ่ม handler สำหรับ GP2 (ISR service ถูกติดตั้งแล้วโดย WiFi manager)
-    esp_err_t ret = gpio_isr_handler_add(FALL_ALARM_GPIO, fall_alarm_isr_handler, NULL);
+    ret = gpio_isr_handler_add(FALL_ALARM_GPIO, fall_alarm_isr_handler, NULL);
     if (ret != ESP_OK) {
         printf("[ERROR] Failed to add fall alarm ISR handler: %s\n", esp_err_to_name(ret));
     } else {
@@ -2384,14 +2399,14 @@ void app_main(void)
         // Debug: Print GPIO states periodically
         int presence = gpio_get_level(PRESENCE_INPUT_GPIO);
         int fall_level = gpio_get_level(FALL_ALARM_GPIO);
+        
+        // อัปเดต g_fall_alarm ให้ตรงกับสถานะของ fall_level
+        update_fall_alarm_from_gpio();
+        
         printf("[DEBUG] GPIO States - Presence (GPIO%d): %d, Fall Alarm (GPIO%d): %d, g_fall_alarm: %d\n", 
                PRESENCE_INPUT_GPIO, presence, FALL_ALARM_GPIO, fall_level, g_fall_alarm);
-        
-      
-      
     }
 }
-
 // Add this function implementation with the other command functions
 void enable_human_presence_detection(bool enable) {
     // Frame structure (10 bytes total):
@@ -2449,5 +2464,11 @@ void wifi_reset_button_task(void *arg) {
         }
         vTaskDelay(pdMS_TO_TICKS(100));
     }
+}
+
+// Helper function to update g_fall_alarm based on GPIO state
+void update_fall_alarm_from_gpio(void) {
+    int fall_level = gpio_get_level(FALL_ALARM_GPIO);
+    g_fall_alarm = (fall_level == 1);
 }
 
