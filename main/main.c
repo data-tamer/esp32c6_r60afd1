@@ -23,6 +23,7 @@ char g_device_id[32] = DEVICE_ID; // Default Device ID (สามารถ overr
 #include "ota_update.h" // เพิ่ม include OTA
 #include <time.h>       // <-- เพิ่มบรรทัดนี้
 #include "driver/gpio.h" // เพิ่มสำหรับใช้งาน GPIO
+#include "esp_timer.h"   // เพิ่มสำหรับใช้งาน esp_timer_get_time()
 
 // เพิ่ม extern สำหรับ certificate
 extern const uint8_t server1_crt_start[] asm("_binary_dev_crt_start");
@@ -74,6 +75,10 @@ void fall_alarm_isr_handler(void* arg);
 
 // Add function prototype for test function
 void test_fall_alarm_trigger(void);
+
+// Add function prototypes for presence query
+void send_presence_query(void);
+void presence_query_task(void *arg);
 
 // ---------------------- UART and Frame Definitions ----------------------
 #define UART_PORT_NUM      UART_NUM_1
@@ -154,8 +159,13 @@ volatile uint32_t g_height_accumulation_time = 0;  // Default value
 volatile bool g_fall_detection_switch = true;  // Default to enabled
 volatile bool g_height_proportion_switch = true;  // Default to enabled
 
+// เพิ่มตัวแปรสำหรับ fall alarm timer
+volatile uint32_t g_fall_alarm_timestamp = 0;  // Timestamp เมื่อ fall alarm ถูกทริกเกอร์
+#define FALL_ALARM_TIMEOUT_MS (2 * 60 * 1000)  // 2 นาที (2 * 60 * 1000 ms)
+
 // Add this function prototype with the other prototypes at the top
 void update_fall_detection_switch(bool enable);
+void fall_alarm_clear_task(void *arg);
 
 // Add this function implementation with the other command functions
 void update_fall_detection_switch(bool enable) {
@@ -474,6 +484,10 @@ void mqtt_publish_live_data(void)
     // printf("[DEBUG] mqtt_publish_live_data() called at %04d-%02d-%02d %02d:%02d:%02d\n",
     //        timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday,
     //        timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+    
+    // เพิ่มการ debug เพื่อแสดงสถานะ presence
+    printf("[MQTT DEBUG] Current presence status: %s\n", g_presence ? "TRUE" : "FALSE");
+    
     char *json_str = get_live_json_payload_str();
     if (json_str) {
         int msg_id = esp_mqtt_client_publish(mqtt_client, mqtt_topic_live, json_str, 0, 1, 0);
@@ -536,7 +550,7 @@ void mqtt_publish_task(void *arg)
         if (mqtt_client != NULL) {
             mqtt_publish_live_data();
         }
-        vTaskDelay(pdMS_TO_TICKS(60000)); // Publish every 60 seconds (1 นาที)
+        vTaskDelay(pdMS_TO_TICKS(15000)); // Publish every 15 seconds
     }
 }
 
@@ -737,6 +751,42 @@ void uart_read_task(void *arg)
                         g_presence = (data[i+6] == 0x01);
                         printf("Parsed Presence: %d\n", g_presence);
                     }
+                    else if(control == 0x80 && command == 0x02 && payload_len == 1) {
+                        // Movement information report - อาจจะใช้เป็น presence indicator
+                        uint8_t movement_value = data[i + 6];
+                        g_movement_state = movement_value; // 0: No movement, 1: Static, 2: Active
+                        // เพิ่มการอัปเดต presence ตาม movement state
+                        if (movement_value > 0) {
+                            g_presence = true;
+                            printf("Updated Presence from Movement State: %d (presence: true)\n", movement_value);
+                        } else {
+                            g_presence = false;
+                            printf("Updated Presence from Movement State: %d (presence: false)\n", movement_value);
+                        }
+                        printf("Parsed Movement State: %d\n", g_movement_state);
+                    }
+                    else if(control == 0x80 && command == 0x03 && payload_len == 1) {
+                        // Body movement parameter report - อาจจะใช้เป็น presence indicator
+                        uint8_t body_movement_value = data[i + 6];
+                        g_body_movement_param = body_movement_value;
+                        // เพิ่มการอัปเดต presence ตาม body movement
+                        if (body_movement_value > 0) {
+                            g_presence = true;
+                            printf("Updated Presence from Body Movement: %d (presence: true)\n", body_movement_value);
+                        } else {
+                            g_presence = false;
+                            printf("Updated Presence from Body Movement: %d (presence: false)\n", body_movement_value);
+                        }
+                        
+                        // เพิ่มเงื่อนไขตรวจสอบ fall alarm เมื่อ body_movement_param เท่ากับ 2
+                        if (body_movement_value == 2) {
+                            g_fall_alarm = true;
+                            g_fall_alarm_timestamp = esp_timer_get_time() / 1000; // ตั้งค่า timestamp
+                            printf("Fall Alarm triggered from Body Movement Param: %d\n", body_movement_value);
+                        }
+                        
+                        printf("Parsed Body Movement Param: %d\n", g_body_movement_param);
+                    }
                     else if(control == 0x05 && command == 0x01 && payload_len == 1) {
                         // Working status report
                         g_working_status = data[i + 6];
@@ -748,23 +798,12 @@ void uart_read_task(void *arg)
                         g_working_status = ack;  // Optionally update the global variable if it carries working status info
                         printf("Parsed Working Status Query Ack: 0x%02X\n", ack);
                     }
-                    else if(control == 0x80 && command == 0x02 && payload_len == 1) {
-                        // Movement information report
-                        uint8_t movement_value = data[i + 6];
-                        g_movement_state = movement_value; // 0: No movement, 1: Static, 2: Active
-                        printf("Parsed Movement State: %d\n", g_movement_state);
-                    }
-                    else if(control == 0x80 && command == 0x03 && payload_len == 1) {
-                        // Body movement parameter report
-                        uint8_t body_movement_value = data[i + 6];
-                        g_body_movement_param = body_movement_value;
-                        printf("Parsed Body Movement Param: %d\n", g_body_movement_param);
-                    }
                     else if(control == 0x83 && command == 0x01 && payload_len == 1) {
                         // Fall Alarm report จาก UART
                         uint8_t fall_value = data[i + 6];
                         if (fall_value == 0x01) {
                             g_fall_alarm = 1; // ล้ม
+                            g_fall_alarm_timestamp = esp_timer_get_time() / 1000; // ตั้งค่า timestamp
                         } else {
                             g_fall_alarm = 0; // ไม่มีการล้ม
                         }
@@ -825,6 +864,15 @@ void uart_read_task(void *arg)
                         g_height_prop_0_5_1 = prop1;
                         g_height_prop_1_1_5 = prop2;
                         g_height_prop_1_5_2 = prop3;
+                        
+                        // เพิ่มการอัปเดต presence ตาม total height count
+                        if (total > 0) {
+                            g_presence = true;
+                            printf("Updated Presence from Height Count: %d (presence: true)\n", total);
+                        } else {
+                            g_presence = false;
+                            printf("Updated Presence from Height Count: %d (presence: false)\n", total);
+                        }
                         
                         // Improved debug output with clear formatting and percentage calculation
                         printf("Height Proportion Report:\n");
@@ -1006,12 +1054,12 @@ void uart_read_task(void *arg)
                         continue;
                     }
                     else {
-                        // Print unknown frame data for debugging
+                        // เพิ่มการ debug สำหรับ frame ที่ไม่รู้จัก
                         printf("🚨🚨 Unknown Frame Data 🚨🚨: ");
                         for (int j = 0; j < payload_len; j++) {
-                            printf("%02X ", data[i + 6 + j]);  // Print each byte in HEX
+                            printf("%02X ", data[i+6+j]);
                         }
-                        printf("\n");
+                        printf(" (Control: 0x%02X, Command: 0x%02X)\n", control, command);
                     }
 
                     
@@ -2257,6 +2305,7 @@ void IRAM_ATTR fall_alarm_isr_handler(void* arg) {
     int level = gpio_get_level(FALL_ALARM_GPIO);
     if (level == 1) {
         g_fall_alarm = 1; // ถ้า GPIO18 ขึ้นขอบขาขึ้น ให้ set ว่าล้ม
+        g_fall_alarm_timestamp = esp_timer_get_time() / 1000; // ตั้งค่า timestamp
         printf("[FALL ALARM] GPIO level: %d, g_fall_alarm set to: %d\n", level, g_fall_alarm);
     }
     // Clear the interrupt flag
@@ -2268,7 +2317,40 @@ void IRAM_ATTR fall_alarm_isr_handler(void* arg) {
 void test_fall_alarm_trigger(void) {
     printf("[TEST] Manually triggering fall alarm...\n");
     g_fall_alarm = true;
+    g_fall_alarm_timestamp = esp_timer_get_time() / 1000; // ตั้งค่า timestamp
     printf("[TEST] g_fall_alarm set to: %d\n", g_fall_alarm);
+}
+
+// กำหนดขา GPIO สำหรับ LED
+#define RED_LED_GPIO     GPIO_NUM_1   // D1
+#define YELLOW_LED_GPIO  GPIO_NUM_2   // D2
+
+void led_init() {
+    gpio_config_t io_conf = {
+        .pin_bit_mask = (1ULL << RED_LED_GPIO) | (1ULL << YELLOW_LED_GPIO),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE
+    };
+    gpio_config(&io_conf);
+    // ดับไฟ LED ทั้งสองดวงตอนเริ่มต้น
+    gpio_set_level(RED_LED_GPIO, 0);
+    gpio_set_level(YELLOW_LED_GPIO, 0);
+}
+
+// ฟังก์ชันควบคุม LED ตามสถานะ alarm
+void update_leds(bool fall_alarm, bool stay_still_alarm) {
+    if (fall_alarm) {
+        gpio_set_level(RED_LED_GPIO, 1);      // ติดไฟแดง
+    } else {
+        gpio_set_level(RED_LED_GPIO, 0);      // ดับไฟแดง
+    }
+    if (stay_still_alarm) {
+        gpio_set_level(YELLOW_LED_GPIO, 1);   // ติดไฟเหลือง
+    } else {
+        gpio_set_level(YELLOW_LED_GPIO, 0);   // ดับไฟเหลือง
+    }
 }
 
 // Main entry point
@@ -2330,6 +2412,12 @@ void app_main(void)
     xTaskCreate(mqtt_publish_task, "mqtt_publish_task", 4096, NULL, 10, NULL);
     xTaskCreate(heartbeat_task, "heartbeat_task", 2048, NULL, 10, NULL);  // Add heartbeat task
     
+    // เพิ่ม task สำหรับส่งคำสั่งขอข้อมูล presence
+    xTaskCreate(presence_query_task, "presence_query_task", 2048, NULL, 10, NULL);
+    
+    // เพิ่ม task สำหรับล้าง fall alarm หลังจาก 2 นาที
+    xTaskCreate(fall_alarm_clear_task, "fall_alarm_clear_task", 2048, NULL, 10, NULL);
+    
     // Initialize height detection separately after other settings
     init_height_detection();
     
@@ -2382,6 +2470,8 @@ void app_main(void)
         printf("[SUCCESS] Fall alarm ISR handler registered for GPIO%d\n", FALL_ALARM_GPIO);
     }
 
+    led_init(); // เรียกก่อนเข้า main loop
+
     // Main loop - keep the system running
     // Note: GPIO polling has been removed to prevent interference with UART/ISR
     // Fall detection is handled by ISR, presence detection by UART data
@@ -2394,6 +2484,9 @@ void app_main(void)
         int fall_level = gpio_get_level(FALL_ALARM_GPIO);
         printf("[DEBUG] GPIO States - Presence (GPIO%d): %d, Fall Alarm (GPIO%d): %d, g_fall_alarm: %d\n", 
                PRESENCE_INPUT_GPIO, presence, FALL_ALARM_GPIO, fall_level, g_fall_alarm);
+
+        update_leds(g_fall_alarm, g_stay_still_alarm); // อัปเดต LED ตามสถานะ alarm
+        vTaskDelay(pdMS_TO_TICKS(100)); // อัปเดตทุก 100ms
     }
 }
 // Add this function implementation with the other command functions
@@ -2452,6 +2545,42 @@ void wifi_reset_button_task(void *arg) {
             hold_time = 0;
         }
         vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+
+// เพิ่มฟังก์ชันสำหรับส่งคำสั่งขอข้อมูล presence
+void send_presence_query(void) {
+    printf("Sent Presence Query\n");
+    send_query(0x80, 0x01, 0x00); // ขอข้อมูล presence
+}
+
+// เพิ่ม task สำหรับส่งคำสั่งขอข้อมูล presence เป็นระยะ
+void presence_query_task(void *arg)
+{
+    while(1) {
+        send_presence_query();
+        vTaskDelay(pdMS_TO_TICKS(5000)); // ส่งคำสั่งทุก 5 วินาที
+    }
+}
+
+// เพิ่ม task สำหรับล้าง fall alarm หลังจาก 2 นาที
+void fall_alarm_clear_task(void *arg)
+{
+    while(1) {
+        // ตรวจสอบว่ามี fall alarm อยู่หรือไม่
+        if (g_fall_alarm && g_fall_alarm_timestamp > 0) {
+            uint32_t current_time = esp_timer_get_time() / 1000; // เวลาปัจจุบันในหน่วย ms
+            uint32_t elapsed_time = current_time - g_fall_alarm_timestamp;
+            
+            // ถ้าเวลาผ่านไปแล้ว 2 นาที ให้ล้าง fall alarm
+            if (elapsed_time >= FALL_ALARM_TIMEOUT_MS) {
+                g_fall_alarm = false;
+                g_fall_alarm_timestamp = 0;
+                printf("Fall Alarm cleared after 2 minutes timeout\n");
+            }
+        }
+        
+        vTaskDelay(pdMS_TO_TICKS(1000)); // ตรวจสอบทุก 1 วินาที
     }
 }
 
