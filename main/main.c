@@ -161,7 +161,7 @@ volatile bool g_height_proportion_switch = true;  // Default to enabled
 
 // เพิ่มตัวแปรสำหรับ fall alarm timer
 volatile uint32_t g_fall_alarm_timestamp = 0;  // Timestamp เมื่อ fall alarm ถูกทริกเกอร์
-#define FALL_ALARM_TIMEOUT_MS (2 * 60 * 1000)  // 2 นาที (2 * 60 * 1000 ms)
+#define FALL_ALARM_TIMEOUT_MS (1 * 60 * 1000)  // 1 นาที (1 * 60 * 1000 ms)
 
 // Add this function prototype with the other prototypes at the top
 void update_fall_detection_switch(bool enable);
@@ -778,11 +778,11 @@ void uart_read_task(void *arg)
                             printf("Updated Presence from Body Movement: %d (presence: false)\n", body_movement_value);
                         }
                         
-                        // เพิ่มเงื่อนไขตรวจสอบ fall alarm เมื่อ body_movement_param เท่ากับ 2
-                        if (body_movement_value == 2) {
+                        // เพิ่มเงื่อนไขตรวจสอบ fall alarm เมื่อ body_movement_param อยู่ในช่วง 50-100
+                        if (body_movement_value >= 50 && body_movement_value <= 100) {
                             g_fall_alarm = true;
                             g_fall_alarm_timestamp = esp_timer_get_time() / 1000; // ตั้งค่า timestamp
-                            printf("Fall Alarm triggered from Body Movement Param: %d\n", body_movement_value);
+                            printf("Fall Alarm triggered from Body Movement Param: %d (Range: 50-100)\n", body_movement_value);
                         }
                         
                         printf("Parsed Body Movement Param: %d\n", g_body_movement_param);
@@ -2572,11 +2572,11 @@ void fall_alarm_clear_task(void *arg)
             uint32_t current_time = esp_timer_get_time() / 1000; // เวลาปัจจุบันในหน่วย ms
             uint32_t elapsed_time = current_time - g_fall_alarm_timestamp;
             
-            // ถ้าเวลาผ่านไปแล้ว 2 นาที ให้ล้าง fall alarm
+            // ถ้าเวลาผ่านไปแล้ว 1 นาที ให้ล้าง fall alarm
             if (elapsed_time >= FALL_ALARM_TIMEOUT_MS) {
                 g_fall_alarm = false;
                 g_fall_alarm_timestamp = 0;
-                printf("Fall Alarm cleared after 2 minutes timeout\n");
+                printf("Fall Alarm cleared after 1 minute timeout\n");
             }
         }
         
