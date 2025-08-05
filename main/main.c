@@ -24,10 +24,13 @@ char g_device_id[32] = DEVICE_ID; // Default Device ID (สามารถ overr
 #include <time.h>       // <-- เพิ่มบรรทัดนี้
 #include "driver/gpio.h" // เพิ่มสำหรับใช้งาน GPIO
 #include "esp_timer.h"   // เพิ่มสำหรับใช้งาน esp_timer_get_time()
+#include "lwip/dns.h"   // เพิ่มสำหรับ DNS functions
+#include "lwip/netdb.h" // เพิ่มสำหรับ gethostbyname
+#include "esp_netif.h"  // เพิ่มสำหรับ network interface functions
 
 // เพิ่ม extern สำหรับ certificate
-extern const uint8_t server1_crt_start[] asm("_binary_dev_crt_start");
-extern const uint8_t server1_crt_end[]   asm("_binary_dev_crt_end");
+extern const uint8_t server1_crt_start[] asm("_binary_prod_crt_start");
+extern const uint8_t server1_crt_end[]   asm("_binary_prod_crt_end");
 
 // Add these function prototypes before mqtt_event_handler
 void update_installation_angles(int16_t angle_x, int16_t angle_y, int16_t angle_z);
@@ -210,7 +213,7 @@ const char* movement_state_str(uint8_t state) {
 }
 
 // ---------------------- MQTT Configurations ----------------------
-#define MQTT_BROKER_URI      "mqtts://dev-connect.datatamer.ai:8884"
+#define MQTT_BROKER_URI      "mqtts://connect.datatamer.ai:8884"
 #define MQTT_USERNAME        "client"
 #define MQTT_PASSWORD        "Apollo1999!"
 // send reading live data
@@ -218,7 +221,7 @@ char mqtt_topic_live[64];
 // request reading product info
 char mqtt_topic_info_device_id[64];
 // send reading product info
-#define MQTT_TOPIC_INFO      "R60AFD1/info"
+#define MQTT_TOPIC_INFO      "R60AFD2/info"
 
 // OTA update topic
 char mqtt_topic_ota_update[64];
@@ -228,7 +231,7 @@ char mqtt_topic_settings_update[64];
 // request reading settings
 char mqtt_topic_settings_state_device_id[64];
 // send reading settings
-#define MQTT_TOPIC_SETTINGS_STATE "R60AFD1/settings_state"
+#define MQTT_TOPIC_SETTINGS_STATE "R60AFD2/settings_state"
 
 static const char *MQTT_TAG = "mqtt_client";
 esp_mqtt_client_handle_t mqtt_client = NULL;
@@ -242,6 +245,10 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
     esp_mqtt_event_handle_t event = event_data;
     
     switch ((esp_mqtt_event_id_t)event_id) {
+        case MQTT_EVENT_BEFORE_CONNECT:
+            ESP_LOGI(MQTT_TAG, "MQTT: Attempting to connect to broker...");
+            break;
+            
         case MQTT_EVENT_CONNECTED:
             ESP_LOGI(MQTT_TAG, "MQTT Connected to broker");
             // Subscribe to settings topic when connected
@@ -258,6 +265,15 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
             break;
         case MQTT_EVENT_DISCONNECTED:
             ESP_LOGI(MQTT_TAG, "MQTT Disconnected from broker");
+            break;
+        case MQTT_EVENT_ERROR:
+            ESP_LOGE(MQTT_TAG, "MQTT Error occurred");
+            // เพิ่มการ retry หลังจากข้อผิดพลาด
+            vTaskDelay(pdMS_TO_TICKS(5000)); // รอ 5 วินาที
+            ESP_LOGI(MQTT_TAG, "Attempting to reconnect to MQTT broker...");
+            esp_mqtt_client_stop(mqtt_client);
+            vTaskDelay(pdMS_TO_TICKS(1000)); // รอ 1 วินาที
+            esp_mqtt_client_start(mqtt_client);
             break;
         case MQTT_EVENT_PUBLISHED:
             ESP_LOGI(MQTT_TAG, "MQTT Message published successfully, msg_id=%d", event->msg_id);
@@ -440,9 +456,6 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
                 ota_update_start(url);
             }
             break;
-        case MQTT_EVENT_ERROR:
-            ESP_LOGI(MQTT_TAG, "MQTT Error occurred");
-            break;
         default:
             break;
     }
@@ -452,6 +465,17 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 void mqtt_init(void)
 {
     esp_log_level_set("mbedtls", ESP_LOG_VERBOSE); // Add this line for detailed TLS logs
+    esp_log_level_set("esp-tls", ESP_LOG_VERBOSE); // เพิ่ม log level สำหรับ esp-tls
+    esp_log_level_set("transport_base", ESP_LOG_VERBOSE); // เพิ่ม log level สำหรับ transport
+
+    // ตรวจสอบการเชื่อมต่อ WiFi ก่อน
+    wifi_ap_record_t ap_info;
+    if (esp_wifi_sta_get_ap_info(&ap_info) != ESP_OK) {
+        ESP_LOGE("MQTT", "WiFi not connected, cannot initialize MQTT");
+        return;
+    }
+    ESP_LOGI("MQTT", "WiFi connected to: %s", ap_info.ssid);
+
     esp_mqtt_client_config_t mqtt_cfg = {
         .broker = {
             .address = {
@@ -467,11 +491,42 @@ void mqtt_init(void)
                 .password = MQTT_PASSWORD,
             },
         },
+        .session = {
+            .keepalive = 60,  // เพิ่ม keepalive
+            .disable_clean_session = 0,
+        },
+        .network = {
+            .timeout_ms = 10000,  // เพิ่ม timeout
+        },
     };
     
     mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
+    if (mqtt_client == NULL) {
+        ESP_LOGE("MQTT", "Failed to initialize MQTT client");
+        return;
+    }
+    
     esp_mqtt_client_register_event(mqtt_client, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL);
-    esp_mqtt_client_start(mqtt_client);
+    
+    // เพิ่มการทดสอบ DNS ก่อนเชื่อมต่อ MQTT
+    ESP_LOGI("MQTT", "Testing DNS resolution before MQTT connection...");
+    struct hostent *he = gethostbyname("connect.datatamer.ai");
+    if (he != NULL) {
+        ESP_LOGI("MQTT", "DNS resolution successful, starting MQTT connection...");
+        esp_mqtt_client_start(mqtt_client);
+    } else {
+        ESP_LOGE("MQTT", "DNS resolution failed, cannot connect to MQTT broker");
+        // ลองใช้ DNS อื่น
+        ESP_LOGI("MQTT", "Trying alternative DNS resolution...");
+        vTaskDelay(pdMS_TO_TICKS(2000)); // รอ 2 วินาที
+        he = gethostbyname("connect.datatamer.ai");
+        if (he != NULL) {
+            ESP_LOGI("MQTT", "Alternative DNS resolution successful, starting MQTT connection...");
+            esp_mqtt_client_start(mqtt_client);
+        } else {
+            ESP_LOGE("MQTT", "All DNS resolution attempts failed");
+        }
+    }
 }
 
 // Publish live data to MQTT
@@ -1054,12 +1109,19 @@ void uart_read_task(void *arg)
                         continue;
                     }
                     else {
-                        // เพิ่มการ debug สำหรับ frame ที่ไม่รู้จัก
-                        printf("🚨🚨 Unknown Frame Data 🚨🚨: ");
-                        for (int j = 0; j < payload_len; j++) {
-                            printf("%02X ", data[i+6+j]);
+                        // Unknown frame - เพิ่มการจัดการที่ดีกว่า
+                        printf("Unknown Frame Data (Control: 0x%02X, Command: 0x%02X, Payload: ", control, command);
+                        for(int j = 0; j < payload_len; j++) {
+                            printf("0x%02X ", data[i+6+j]);
                         }
-                        printf(" (Control: 0x%02X, Command: 0x%02X)\n", control, command);
+                        printf(")\n");
+                        
+                        // บันทึก unknown frame สำหรับการวิเคราะห์
+                        printf("Raw unknown frame: ");
+                        for(int j = 0; j < frame_total_length; j++) {
+                            printf("%02X ", data[i+j]);
+                        }
+                        printf("\n");
                     }
 
                     
@@ -1751,6 +1813,23 @@ void wifi_init_sta(void)
     esp_netif_t *sta_netif = esp_netif_create_default_wifi_sta();
     esp_netif_set_hostname(sta_netif, "Falldetector7");
     
+    // เพิ่มการตั้งค่า DNS servers
+    esp_netif_dns_info_t dns_info;
+    ip_addr_t primary_dns;
+    ip_addr_t secondary_dns;
+    
+    // ตั้งค่า DNS servers (Google DNS และ Cloudflare DNS)
+    IP_ADDR4(&primary_dns, 8, 8, 8, 8);      // Google DNS
+    IP_ADDR4(&secondary_dns, 1, 1, 1, 1);    // Cloudflare DNS
+    
+    dns_info.ip.u_addr.ip4.addr = primary_dns.u_addr.ip4.addr;
+    dns_info.ip.type = ESP_IPADDR_TYPE_V4;
+    esp_netif_set_dns_info(sta_netif, ESP_NETIF_DNS_MAIN, &dns_info);
+    
+    dns_info.ip.u_addr.ip4.addr = secondary_dns.u_addr.ip4.addr;
+    esp_netif_set_dns_info(sta_netif, ESP_NETIF_DNS_BACKUP, &dns_info);
+    
+    ESP_LOGI(TAG, "DNS servers configured: 8.8.8.8, 1.1.1.1");
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
@@ -1794,6 +1873,18 @@ void wifi_init_sta(void)
 
     if (bits & WIFI_CONNECTED_BIT) {
         ESP_LOGI(TAG, "Connected to AP SSID:%s", WIFI_SSID);
+        
+        // ทดสอบการเชื่อมต่อ DNS
+        struct hostent *he = gethostbyname("connect.datatamer.ai");
+        if (he != NULL) {
+            ESP_LOGI(TAG, "DNS resolution successful for connect.datatamer.ai");
+            struct in_addr **addr_list = (struct in_addr **)he->h_addr_list;
+            if (addr_list[0] != NULL) {
+                ESP_LOGI(TAG, "Resolved IP: %s", inet_ntoa(*addr_list[0]));
+            }
+        } else {
+            ESP_LOGE(TAG, "DNS resolution failed for connect.datatamer.ai");
+        }
     } else if (bits & WIFI_FAIL_BIT) {
         ESP_LOGI(TAG, "Failed to connect to SSID:%s", WIFI_SSID);
     } else {

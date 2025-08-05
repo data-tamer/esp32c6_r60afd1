@@ -1,5 +1,5 @@
 set(DEVICE_ID "falldetector" CACHE STRING "Device ID for this build")
-set(CERT_FILE "dev.crt" CACHE STRING "Path to the certificate file")
+set(CERT_FILE "prod.crt" CACHE STRING "Path to the certificate file")
 
 idf_component_register(
     SRCS "main.c" "ota_update.c"         # เพิ่ม ota_update.c
@@ -12,7 +12,7 @@ idf_component_register(
 target_compile_definitions(${COMPONENT_LIB} PRIVATE DEVICE_ID=\"${DEVICE_ID}\")
 
 if(NOT DEFINED CERT_FILE)
-    set(CERT_FILE "dev.crt")
+    set(CERT_FILE "prod.crt")
 endif()
 
 if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${CERT_FILE}")
